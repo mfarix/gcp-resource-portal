@@ -1,0 +1,85 @@
+# docker-compose.yml
+services:
+  # Backend API Service
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=development
+      - PORT=3001
+      - CORS_ORIGIN=http://localhost:3000
+      # GCP Authentication - use one of these methods:
+      # Method 1: Service Account Key (for local development)
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials/gcp-key.json
+      # Method 2: Use host's gcloud auth (uncomment if using gcloud auth)
+      # - GOOGLE_APPLICATION_CREDENTIALS=/tmp/adc.json
+    volumes:
+      # Method 1: Mount service account key
+      - ./gcp-credentials:/app/credentials:ro
+      # Method 2: Mount host's gcloud credentials (uncomment if using gcloud auth)
+      # - ~/.config/gcloud:/root/.config/gcloud:ro
+      # - /tmp/adc.json:/tmp/adc.json:ro
+      # For development: mount source code for hot reload
+      - ./backend:/app
+      - /app/node_modules
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Frontend React Service
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: development
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:3001
+      - CHOKIDAR_USEPOLLING=true
+    volumes:
+      # For development: mount source code for hot reload
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Optional: Redis for caching (production-like setup)
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+  # Optional: Nginx reverse proxy (production-like setup)
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - frontend
+      - backend
+    restart: unless-stopped
+    profiles:
+      - production-like
+
+volumes:
+  redis-data:
+
+networks:
+  default:
+    name: gcp-resource-portal-network
