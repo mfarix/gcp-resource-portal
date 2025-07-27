@@ -1063,6 +1063,14 @@ app.post('/api/metrics', async (req, res) => {
             memoryResponseLength: memoryResponse?.length || 0
           });
           
+          // Generate formatted values for frontend display
+          const formattedValues = formatResourceValues(
+            resources.requests.cpu,
+            resources.requests.memory,
+            recommendedCPU,
+            recommendedMemory
+          );
+
           const processedMetrics = {
             name: workload.name,
             namespace: workload.namespace,
@@ -1076,6 +1084,11 @@ app.post('/api/metrics', async (req, res) => {
             memoryUsage: memoryUsage,
             recommendedCPU: recommendedCPU,
             recommendedMemory: recommendedMemory,
+            // Add formatted values for frontend
+            cpuRequestFormatted: formattedValues.cpuRequestFormatted,
+            memoryRequestFormatted: formattedValues.memoryRequestFormatted,
+            recommendedCPUFormatted: formattedValues.recommendedCPUFormatted,
+            recommendedMemoryFormatted: formattedValues.recommendedMemoryFormatted,
             efficiency: calculateEfficiency(cpuResponse, memoryResponse, resources),
             cost: calculateCost(resources, actualReplicas),
             potentialSavings: calculatePotentialSavingsWithVPA(vpaRecommendations, resources),
@@ -1090,10 +1103,11 @@ app.post('/api/metrics', async (req, res) => {
               totalCpuRecommended: vpaRecommendations.cpu,
               totalMemoryRecommended: vpaRecommendations.memory
             } : null,
-            // Add per-container resource requests (current usage)
+            // Add per-container resource requests (current usage) and recommendations
             containerDetails: {
               cpuRequestsPerContainer: resourceRequests.cpuPerContainer || {},
-              memoryRequestsPerContainer: resourceRequests.memoryPerContainer || {}
+              memoryRequestsPerContainer: resourceRequests.memoryPerContainer || {},
+              recommendations: generateContainerRecommendations(vpaRecommendations, resourceRequests)
             }
           };
           
@@ -1299,6 +1313,123 @@ function calculatePotentialSavingsWithVPA(vpaRecommendations, resources) {
   return Math.round(savings * 100) / 100;
 }
 
+// Helper function to format resource values for frontend display
+function formatResourceValues(cpuRequest, memoryRequest, recommendedCPU, recommendedMemory) {
+  return {
+    cpuRequestFormatted: cpuRequest ? `${cpuRequest}m` : '0m',
+    memoryRequestFormatted: memoryRequest ? `${Math.round(memoryRequest / (1024 * 1024))}Mi` : '0Mi',
+    recommendedCPUFormatted: recommendedCPU ? `${recommendedCPU}m` : null,
+    recommendedMemoryFormatted: recommendedMemory ? `${Math.round(recommendedMemory / (1024 * 1024))}Mi` : null
+  };
+}
+
+// Generate per-container recommendations in JSON format for frontend integration
+function generateContainerRecommendations(vpaRecommendations, resourceRequests) {
+  const containerRecommendations = {};
+  
+  if (!vpaRecommendations.available) {
+    return containerRecommendations;
+  }
+  
+  // Get all container names from both current requests and VPA recommendations
+  const allContainers = new Set([
+    ...Object.keys(resourceRequests.cpuPerContainer || {}),
+    ...Object.keys(resourceRequests.memoryPerContainer || {}),
+    ...Object.keys(vpaRecommendations.cpuPerContainer || {}),
+    ...Object.keys(vpaRecommendations.memoryPerContainer || {})
+  ]);
+  
+  allContainers.forEach(containerName => {
+    const currentCpuRequest = resourceRequests.cpuPerContainer?.[containerName] || 0;
+    const currentMemoryRequest = resourceRequests.memoryPerContainer?.[containerName] || 0;
+    const recommendedCpuCores = vpaRecommendations.cpuPerContainer?.[containerName] || null;
+    const recommendedMemoryBytes = vpaRecommendations.memoryPerContainer?.[containerName] || null;
+    
+    // Calculate rounded recommendations
+    let roundedCpuMillicores = null;
+    let roundedMemoryBytes = null;
+    
+    if (recommendedCpuCores !== null) {
+      const cpuMillicores = Math.round(recommendedCpuCores * 1000);
+      roundedCpuMillicores = Math.max(10, Math.ceil(cpuMillicores / 10) * 10);
+    }
+    
+    if (recommendedMemoryBytes !== null) {
+      const mebibyte = 1024 * 1024;
+      roundedMemoryBytes = Math.max(16 * mebibyte, Math.ceil(recommendedMemoryBytes / (16 * mebibyte)) * (16 * mebibyte));
+    }
+    
+    // Generate recommendations and analysis for this container
+    const recommendations = [];
+    let status = 'optimal';
+    let potentialSavings = 0;
+    
+    // CPU analysis
+    if (roundedCpuMillicores !== null && currentCpuRequest > 0) {
+      const cpuDifference = ((roundedCpuMillicores - currentCpuRequest) / currentCpuRequest) * 100;
+      
+      if (Math.abs(cpuDifference) > 20) {
+        const action = cpuDifference > 0 ? 'increase' : 'reduce';
+        const verb = cpuDifference > 0 ? 'under-provisioned' : 'over-provisioned';
+        status = cpuDifference > 0 ? 'under-resourced' : 'over-resourced';
+        recommendations.push(`CPU ${verb}: ${action} by ${Math.round(Math.abs(cpuDifference))}%`);
+        
+        if (cpuDifference < 0) {
+          // Calculate potential CPU cost savings (rough estimate)
+          const cpuSavings = (currentCpuRequest - roundedCpuMillicores) * 0.02; // ~$0.02 per CPU per month
+          potentialSavings += cpuSavings;
+        }
+      }
+    }
+    
+    // Memory analysis
+    if (roundedMemoryBytes !== null && currentMemoryRequest > 0) {
+      const memoryDifference = ((roundedMemoryBytes - currentMemoryRequest) / currentMemoryRequest) * 100;
+      
+      if (Math.abs(memoryDifference) > 20) {
+        const action = memoryDifference > 0 ? 'increase' : 'reduce';
+        const verb = memoryDifference > 0 ? 'under-provisioned' : 'over-provisioned';
+        if (status === 'optimal') status = memoryDifference > 0 ? 'under-resourced' : 'over-resourced';
+        recommendations.push(`Memory ${verb}: ${action} by ${Math.round(Math.abs(memoryDifference))}%`);
+        
+        if (memoryDifference < 0) {
+          // Calculate potential memory cost savings (rough estimate)
+          const memoryGb = (currentMemoryRequest - roundedMemoryBytes) / (1024 * 1024 * 1024);
+          const memorySavings = memoryGb * 0.67; // ~$0.67 per GB per month
+          potentialSavings += memorySavings;
+        }
+      }
+    }
+    
+    // Store container recommendation data
+    containerRecommendations[containerName] = {
+      current: {
+        cpu: currentCpuRequest,
+        memory: currentMemoryRequest,
+        cpuFormatted: `${currentCpuRequest}m`,
+        memoryFormatted: `${Math.round(currentMemoryRequest / (1024 * 1024))}Mi`
+      },
+      recommended: {
+        cpu: roundedCpuMillicores,
+        memory: roundedMemoryBytes,
+        cpuFormatted: roundedCpuMillicores ? `${roundedCpuMillicores}m` : null,
+        memoryFormatted: roundedMemoryBytes ? `${Math.round(roundedMemoryBytes / (1024 * 1024))}Mi` : null
+      },
+      analysis: {
+        status: status,
+        recommendations: recommendations,
+        potentialSavings: Math.round(potentialSavings * 100) / 100,
+        cpuDifferencePercent: roundedCpuMillicores && currentCpuRequest > 0 ? 
+          Math.round(((roundedCpuMillicores - currentCpuRequest) / currentCpuRequest) * 100) : null,
+        memoryDifferencePercent: roundedMemoryBytes && currentMemoryRequest > 0 ? 
+          Math.round(((roundedMemoryBytes - currentMemoryRequest) / currentMemoryRequest) * 100) : null
+      }
+    };
+  });
+  
+  return containerRecommendations;
+}
+
 // VPA-aware recommendations with per-container details
 function generateRecommendationsWithVPA(vpaRecommendations, cpuSeries, memorySeries, resources) {
   const recommendations = [];
@@ -1362,7 +1493,7 @@ function generateRecommendationsWithVPA(vpaRecommendations, cpuSeries, memorySer
     
     // Display CPU recommendations
     if (Object.keys(roundedCpuPerContainer).length > 0) {
-      recommendations.push('📊 CPU Recommendations by Container:');
+      recommendations.push('CPU Recommendations by Container:');
       Object.entries(roundedCpuPerContainer).forEach(([containerName, cpuMillicores]) => {
         recommendations.push(`  • ${containerName}: ${cpuMillicores}m CPU`);
       });
@@ -1371,7 +1502,7 @@ function generateRecommendationsWithVPA(vpaRecommendations, cpuSeries, memorySer
     
     // Display Memory recommendations
     if (Object.keys(roundedMemoryPerContainer).length > 0) {
-      recommendations.push('💾 Memory Recommendations by Container:');
+      recommendations.push('Memory Recommendations by Container:');
       const mebibyte = 1024 * 1024;
       Object.entries(roundedMemoryPerContainer).forEach(([containerName, memoryBytes]) => {
         const memoryMi = Math.round(memoryBytes / mebibyte);
