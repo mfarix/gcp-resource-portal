@@ -1071,6 +1071,10 @@ app.post('/api/metrics', async (req, res) => {
             recommendedMemory
           );
 
+          // Calculate cost and potential savings first
+          const cost = calculateCost(resources, actualReplicas);
+          const potentialSavings = calculatePotentialSavingsWithVPA(vpaRecommendations, resources, actualReplicas);
+
           const processedMetrics = {
             name: workload.name,
             namespace: workload.namespace,
@@ -1089,9 +1093,9 @@ app.post('/api/metrics', async (req, res) => {
             memoryRequestFormatted: formattedValues.memoryRequestFormatted,
             recommendedCPUFormatted: formattedValues.recommendedCPUFormatted,
             recommendedMemoryFormatted: formattedValues.recommendedMemoryFormatted,
-            efficiency: calculateEfficiency(cpuResponse, memoryResponse, resources),
-            cost: calculateCost(resources, actualReplicas),
-            potentialSavings: calculatePotentialSavingsWithVPA(vpaRecommendations, resources),
+            cost: cost,
+            potentialSavings: potentialSavings,
+            efficiency: calculateEfficiencyFromSavings(cost, potentialSavings),
             status: 'running',
             recommendations: generateRecommendationsWithVPA(vpaRecommendations, cpuResponse, memoryResponse, resources),
             platform: 'gke',
@@ -1271,22 +1275,29 @@ function calculateEfficiency(cpuSeries, memorySeries, resources) {
 }
 
 function calculateCost(resources, replicas) {
-  // GKE pricing (simplified)
-  const cpuCostPerHour = 0.031611; // per vCPU per hour
-  const memoryCostPerHour = 0.004237; // per GB per hour
+  // GCP pricing from provided rates
+  const cpuCostPerHour = 0.0549 / 1000; // $0.0549 per 1000 vCPU hours, so $0.0000549 per vCPU hour
+  const memoryCostPerGiBHour = 0.0060729; // $0.0060729 per GiB hour
   
   const cpuCores = (resources?.requests?.cpu || 100) / 1000;
-  const memoryGB = (resources?.requests?.memory || 128 * 1024 * 1024) / (1024 * 1024 * 1024);
+  const memoryGiB = (resources?.requests?.memory || 128 * 1024 * 1024) / (1024 * 1024 * 1024); // Convert bytes to GiB
   
-  const hourlyCost = (cpuCores * cpuCostPerHour + memoryGB * memoryCostPerHour) * replicas;
-  const monthlyCost = hourlyCost * 24 * 30;
+  const hourlyCost = (cpuCores * cpuCostPerHour + memoryGiB * memoryCostPerGiBHour) * replicas;
+  const monthlyCost = hourlyCost * 730; // 730 hours per month
   
   return Math.round(monthlyCost * 100) / 100;
 }
 
+// Calculate efficiency as percentage of potential savings compared to cost
+function calculateEfficiencyFromSavings(cost, potentialSavings) {
+  if (cost <= 0) return 0;
+  const efficiency = (potentialSavings / cost) * 100;
+  return Math.min(100, Math.max(0, Math.round(efficiency)));
+}
+
 // VPA-aware cost calculation
-function calculatePotentialSavingsWithVPA(vpaRecommendations, resources) {
-  const currentCost = calculateCost(resources, 1);
+function calculatePotentialSavingsWithVPA(vpaRecommendations, resources, replicas) {
+  const currentCost = calculateCost(resources, replicas);
   
   let optimizedResources;
   if (vpaRecommendations.available) {
@@ -1307,7 +1318,7 @@ function calculatePotentialSavingsWithVPA(vpaRecommendations, resources) {
     };
   }
   
-  const optimizedCost = calculateCost(optimizedResources, 1);
+  const optimizedCost = calculateCost(optimizedResources, replicas);
   const savings = Math.max(0, currentCost - optimizedCost);
   
   return Math.round(savings * 100) / 100;
@@ -1375,8 +1386,11 @@ function generateContainerRecommendations(vpaRecommendations, resourceRequests) 
         recommendations.push(`CPU ${verb}: ${action} by ${Math.round(Math.abs(cpuDifference))}%`);
         
         if (cpuDifference < 0) {
-          // Calculate potential CPU cost savings (rough estimate)
-          const cpuSavings = (currentCpuRequest - roundedCpuMillicores) * 0.02; // ~$0.02 per CPU per month
+          // Calculate potential CPU cost savings using GCP pricing
+          const cpuSavedMillicores = currentCpuRequest - roundedCpuMillicores;
+          const cpuSavedCores = cpuSavedMillicores / 1000;
+          const cpuCostPerHour = 0.0549 / 1000; // $0.0549 per 1000 vCPU hours
+          const cpuSavings = cpuSavedCores * cpuCostPerHour * 730; // Monthly savings
           potentialSavings += cpuSavings;
         }
       }
@@ -1393,9 +1407,11 @@ function generateContainerRecommendations(vpaRecommendations, resourceRequests) 
         recommendations.push(`Memory ${verb}: ${action} by ${Math.round(Math.abs(memoryDifference))}%`);
         
         if (memoryDifference < 0) {
-          // Calculate potential memory cost savings (rough estimate)
-          const memoryGb = (currentMemoryRequest - roundedMemoryBytes) / (1024 * 1024 * 1024);
-          const memorySavings = memoryGb * 0.67; // ~$0.67 per GB per month
+          // Calculate potential memory cost savings using GCP pricing
+          const memorySavedBytes = currentMemoryRequest - roundedMemoryBytes;
+          const memorySavedGiB = memorySavedBytes / (1024 * 1024 * 1024);
+          const memoryCostPerGiBHour = 0.0060729; // $0.0060729 per GiB hour
+          const memorySavings = memorySavedGiB * memoryCostPerGiBHour * 730; // Monthly savings
           potentialSavings += memorySavings;
         }
       }

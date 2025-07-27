@@ -538,7 +538,7 @@ const GCPResourcePortal = () => {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Namespace</label>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Namespace *</label>
               <input
                 type="text"
                 value={selectedNamespace}
@@ -549,7 +549,7 @@ const GCPResourcePortal = () => {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Workload Name</label>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Workload Name *</label>
               <input
                 type="text"
                 value={selectedWorkload}
@@ -602,7 +602,7 @@ const GCPResourcePortal = () => {
         {/* Stats Cards */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
           <StatCard
-            title="Total Monthly Cost"
+            title="Monthly Cost"
             value={totalCost}
             icon={DollarSign}
             unit="$"
@@ -614,7 +614,7 @@ const GCPResourcePortal = () => {
             unit="$"
           />
           <StatCard
-            title="Average Efficiency"
+            title="Average Savings"
             value={avgEfficiency}
             icon={Zap}
             unit="%"
